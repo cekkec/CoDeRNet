@@ -1,0 +1,45 @@
+# ─── Python ────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# ─── Virtual environments ──────────────────────────────
+venv/
+env/
+.venv/
+.env
+
+# ─── IDE / editor / OS ─────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ─── Build / packaging ─────────────────────────────────
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# ─── Training artefacts (do NOT commit weights or logs) ─
+Results/
+results/
+Out_folder/
+predict_result/
+predict_results/
+predict/
+*.pth
+*.pt
+*.ckpt
+
+# ─── Java crash logs (METEOR scorer in eval_func/) ─────
+hs_err_pid*.log
+replay_pid*.log
+*.log
+
+# ─── Jupyter / data caches ─────────────────────────────
+.ipynb_checkpoints/
+*.ipynb

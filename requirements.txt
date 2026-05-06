@@ -1,0 +1,21 @@
+# CoDeRNet runtime requirements (tested versions in parentheses).
+# Install with:  pip install -r requirements.txt
+
+# Deep learning
+torch>=2.0                              # (tested with 2.7.0+cu126)
+torchvision>=0.15                       # (tested with 0.22.0)
+
+# Backbone encoders (uses timm under the hood)
+segmentation_models_pytorch>=0.4        # (tested with 0.5.0)
+
+# Numerics + image I/O
+numpy>=1.24                             # (tested with 2.4.3)
+opencv-python>=4.7                      # (tested with 4.13.0)
+imageio>=2.30                           # (tested with 2.37.3)
+pillow>=10.0                            # (tested with 12.1.1)
+
+# Utilities
+tqdm>=4.65                              # (tested with 4.67.3)
+
+# NOTE: METEOR scoring in eval_func/meteor relies on a Java runtime.
+#       Install a JDK (e.g. `openjdk-17-jre`) separately if it is not present.
