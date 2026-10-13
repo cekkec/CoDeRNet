@@ -171,7 +171,7 @@ Mask coloring:
 
 ## Pretrained Weights
 
-The released checkpoints are hosted on Google Drive: https://drive.google.com/drive/folders/1YMWuIE8tzl2eswk3lShkfugSN3tzbtXw
+The released checkpoints are hosted on [Google Drive](https://drive.google.com/drive/folders/1YMWuIE8tzl2eswk3lShkfugSN3tzbtXw).
 
 | File | Dataset | Configuration |
 |---|---|---|
