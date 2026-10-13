@@ -152,9 +152,7 @@ python test.py \
 
 `--checkpoint` takes either a released checkpoint (see below; it defaults to `./checkpoints/<levir_mci|whu_cdc>.pth`) or a `best_epoch<N>.pth` written by `train.py`.
 
-Reported metrics: `mIoU` (or `cIoU` for binary WHU-CDC), `binIoU`, `BLEU-1..4`, `METEOR`, `ROUGE-L`, `CIDEr-D`.
-
-`binIoU` is the IoU of the merged change class: on LEVIR-MCI, road and building are merged into a single change class and scored against the background; on WHU-CDC it equals `cIoU`.
+Reported metrics: `mIoU` (or `cIoU` for binary WHU-CDC), `BLEU-1..4`, `METEOR`, `ROUGE-L`, `CIDEr-D`.
 
 When `--save_pred` is set:
 
@@ -193,25 +191,11 @@ Place the files under `./checkpoints/`: `test.py` looks there by default (`levir
 Test-split examples compared with MCINet. Masks: black = background, yellow = road, red = building. Below each row, the ground-truth caption and the captions predicted by the two models are shown; road and building words are colored accordingly.
 
 
-## TIPS Backbone (optional)
-
-The released checkpoints and the numbers above use the ConvNeXt-Base encoder. As an alternative, the encoder can be replaced with a [TIPSv2](https://github.com/google-deepmind/tips) ViT. Download a TIPS vision checkpoint (`*_vision.npz`) from the TIPS repository and pass it explicitly:
-
-```bash
-python train.py --dataset levir ... \
-    --backbone tips_vit_b14 \
-    --tips_npz <path>/tips_v2_oss_b14_vision.npz \
-    --vit_lr 1.5e-5
-```
-
-`test.py` must be given the same `--backbone` and `--tips_npz` options as the training run.
-
-
 ## Acknowledgements
 
-The data loading, the LEVIR-MCI preprocessing (`preprocess_levir_mci.py`) and the evaluation code are adapted from [Change-Agent](https://github.com/Chen-Yang-Liu/Change-Agent). The captioning scorers in `eval_func/` come from [coco-caption](https://github.com/tylin/coco-caption), and `model/tips_vit.py` is the image encoder of [TIPS](https://github.com/google-deepmind/tips).
+The data loading, the LEVIR-MCI preprocessing (`preprocess_levir_mci.py`) and the evaluation code are adapted from [Change-Agent](https://github.com/Chen-Yang-Liu/Change-Agent). The captioning scorers in `eval_func/` come from [coco-caption](https://github.com/tylin/coco-caption).
 
 
 ## License
 
-This project is released under the MIT License (see `LICENSE`). Third-party code keeps its own license: `model/tips_vit.py` is distributed under the Apache License 2.0 (copy in `model/TIPS_LICENSE`), and the scorers in `eval_func/` keep their original license (`eval_func/LICENSE`).
+This project is released under the MIT License (see `LICENSE`). The captioning scorers in `eval_func/` keep their original license (`eval_func/LICENSE`).
