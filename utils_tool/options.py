@@ -38,18 +38,11 @@ def add_data_args(parser):
 def add_model_args(parser):
     """Model options. At test time they must match the training configuration."""
     parser.add_argument('--backbone', default='tu-convnext_base',
-                        help='smp encoder name (e.g. tu-convnext_base) or a TIPS ViT '
-                             '(tips_vit_b14 / tips_vit_l14 / tips_vit_so14)')
+                        help='segmentation_models_pytorch encoder name')
     parser.add_argument('--d_model',          type=int, default=256)
     parser.add_argument('--n_heads',          type=int, default=8)
     parser.add_argument('--decoder_n_layers', type=int, default=1)
     parser.add_argument('--dropout',          type=float, default=0.1)
-
-    # TIPS ViT backbone (only used when --backbone tips_*)
-    parser.add_argument('--tips_npz', default=None,
-                        help='path to the TIPS vision checkpoint (*_vision.npz)')
-    parser.add_argument('--tips_img_size', type=int, default=224,
-                        help='ViT input resolution (224 or 448)')
 
 
 def apply_dataset_defaults(args, parser=None):

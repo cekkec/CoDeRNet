@@ -18,17 +18,7 @@ class ChangeModel(nn.Module):
         super().__init__()
         d_model = args.d_model
 
-        if str(args.backbone).startswith('tips'):
-            # Optional ViT backbone, imported only when requested so that the
-            # default ConvNeXt path does not depend on it.
-            from .encoder_tips import TIPSEncoder
-            self.encoder = TIPSEncoder(
-                backbone_name=args.backbone, d_model=d_model,
-                npz_path=getattr(args, 'tips_npz', None),
-                img_size=getattr(args, 'tips_img_size', 224),
-                pretrained=True)
-        else:
-            self.encoder = Encoder(backbone_name=args.backbone, d_model=d_model, pretrained=True)
+        self.encoder = Encoder(backbone_name=args.backbone, d_model=d_model, pretrained=True)
         self.fusion = ChangeFusion(d_model=d_model)
 
         self.projection = BranchProjection(d_model=d_model)
@@ -91,18 +81,9 @@ class ChangeModel(nn.Module):
         _, _, stats = self._extract_feats(imgA, imgB, return_stats=True)
         return stats
 
-    def get_param_groups(self, encoder_lr, decoder_lr, vit_lr=None):
-        # A TIPS encoder is split into the ViT backbone (lower LR) and its
-        # multi-scale adapter (decoder LR).
-        if hasattr(self.encoder, 'vit_parameters'):
-            enc_groups = [
-                {'params': list(self.encoder.vit_parameters()),
-                 'lr': vit_lr if vit_lr is not None else encoder_lr},
-                {'params': list(self.encoder.adapter_parameters()), 'lr': decoder_lr},
-            ]
-        else:
-            enc_groups = [{'params': list(self.encoder.parameters()), 'lr': encoder_lr}]
-        return enc_groups + [
+    def get_param_groups(self, encoder_lr, decoder_lr):
+        return [
+            {'params': list(self.encoder.parameters()),     'lr': encoder_lr},
             {'params': list(self.fusion.parameters()),      'lr': decoder_lr},
             {'params': list(self.projection.parameters()),  'lr': decoder_lr},
             {'params': list(self.comp_inter.parameters()),  'lr': decoder_lr},

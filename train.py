@@ -118,8 +118,7 @@ class Trainer:
         self.model = ChangeModel(args, self.word_vocab).cuda()
 
         # Optimizer
-        param_groups = self.model.get_param_groups(
-            args.encoder_lr, args.decoder_lr, vit_lr=args.vit_lr)
+        param_groups = self.model.get_param_groups(args.encoder_lr, args.decoder_lr)
         self.optimizer = torch.optim.Adam(param_groups)
         self.lr_scheduler = torch.optim.lr_scheduler.StepLR(self.optimizer, step_size=50, gamma=0.5)
 
@@ -554,9 +553,6 @@ def _parse_train_args():
     parser.add_argument('--num_epochs', type=int, default=150)
     parser.add_argument('--encoder_lr', type=float, default=1e-4)
     parser.add_argument('--decoder_lr', type=float, default=1e-4)
-    parser.add_argument('--vit_lr', type=float, default=None,
-                        help='learning rate of the TIPS ViT backbone (typically '
-                             '1e-5 to 2e-5); defaults to --encoder_lr')
     parser.add_argument('--grad_clip',  type=float, default=None)
     parser.add_argument('--print_freq', type=int, default=100)
     parser.add_argument('--workers',    type=int, default=4)
