@@ -180,10 +180,10 @@ The released checkpoints are hosted on [Google Drive](https://drive.google.com/d
 
 Place the files under `./checkpoints/`: `test.py` looks there by default (`levir_mci.pth` for `--dataset levir`, `whu_cdc.pth` for `--dataset whu`), and any other location can be passed with `--checkpoint`. Test-split results of the released checkpoints:
 
-| Dataset | mIoU / cIoU | binIoU | BLEU-1 | BLEU-2 | BLEU-3 | BLEU-4 | METEOR | ROUGE-L | CIDEr-D |
-|---|---|---|---|---|---|---|---|---|---|
-| LEVIR-MCI | 87.79 (mIoU) | 83.07 | 87.25 | 79.42 | 72.26 | 66.27 | 41.08 | 76.36 | 141.79 |
-| WHU-CDC   | 90.25 (cIoU) | 90.25 | 87.44 | 82.38 | 77.85 | 74.17 | 49.04 | 83.58 | 163.37 |
+| Dataset | mIoU / cIoU | BLEU-1 | BLEU-2 | BLEU-3 | BLEU-4 | METEOR | ROUGE-L | CIDEr-D |
+|---|---|---|---|---|---|---|---|---|
+| LEVIR-MCI | 87.79 (mIoU) | 87.25 | 79.42 | 72.26 | 66.27 | 41.08 | 76.36 | 141.79 |
+| WHU-CDC   | 90.25 (cIoU) | 87.44 | 82.38 | 77.85 | 74.17 | 49.04 | 83.58 | 163.37 |
 
 
 ## Qualitative Results (LEVIR-MCI)
