@@ -35,6 +35,17 @@ class Evaluator(object):
             np.diag(self.confusion_matrix))
         return IoU[1] if len(IoU) > 1 else 0.0
 
+    def Binary_Change_IoU(self):
+        """IoU of the merged change class: every class index >= 1 counts as
+        'change' and is scored against background (index 0). On LEVIR-MCI this
+        merges road and building; on a binary dataset it equals Change_IoU()."""
+        cm = self.confusion_matrix
+        tp = cm[1:, 1:].sum()
+        fp = cm[0, 1:].sum()
+        fn = cm[1:, 0].sum()
+        denom = tp + fp + fn
+        return tp / denom if denom > 0 else 0.0
+
     def F1_Score(self):
         precision = np.diag(self.confusion_matrix) / self.confusion_matrix.sum(axis=0)
         recall = np.diag(self.confusion_matrix) / self.confusion_matrix.sum(axis=1)

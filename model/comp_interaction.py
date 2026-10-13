@@ -21,14 +21,9 @@ class CompInteraction(nn.Module):
         self.seg_recv_scale = seg_recv_scale
         self.cap_recv_scale = cap_recv_scale
 
-        scale_names = ['1/4', '1/8', '1/16', '1/32']
-
         # Two independent CoDeR blocks, one per direction.
         self.seg_recv = CoDeR(d_model, variant=variant)   # cap -> seg
         self.cap_recv = CoDeR(d_model, variant=variant)   # seg -> cap
-
-        print(f'[CompInteraction] cap -> seg @ {scale_names[seg_recv_scale]}')
-        print(f'[CompInteraction] seg -> cap @ {scale_names[cap_recv_scale]}')
 
     def forward(self, seg_feats, cap_feats):
         """Apply CoDeR bidirectionally at the configured scales.

@@ -1,8 +1,3 @@
-import os
-import torch
-import numpy as np
-import time
-import random
 from eval_func.bleu.bleu import Bleu
 from eval_func.rouge.rouge import Rouge
 from eval_func.cider.cider import Cider
@@ -35,12 +30,6 @@ def get_eval_score(references, hypotheses):
         method.extend(method_i) if isinstance(method_i, list) else method.append(method_i)
     score_dict = dict(zip(method, score))
     return score_dict
-
-
-def time_file_str():
-    ISOTIMEFORMAT = '%Y-%m-%d-%H-%M-%S'
-    string = '{}'.format(time.strftime(ISOTIMEFORMAT, time.gmtime(time.time())))
-    return string
 
 
 def print_log(print_string, log):

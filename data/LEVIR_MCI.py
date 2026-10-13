@@ -1,10 +1,9 @@
-import torch
 from torch.utils.data import Dataset
 import json
 import os
 import numpy as np
 import random as pyrandom
-from random import randint, random, uniform
+from random import randint, random
 from imageio import imread
 
 
@@ -141,10 +140,10 @@ class LEVIRCCDataset(Dataset):
         self._epoch = 0
 
         assert self.split in {'train', 'val', 'test'}
-        self.img_ids = [i_id.strip() for i_id in open(os.path.join(list_path + split + '.txt'))]
+        self.img_ids = [i_id.strip() for i_id in open(os.path.join(list_path, split + '.txt'))]
 
         if vocab_file is not None:
-            with open(os.path.join(list_path + vocab_file + '.json'), 'r') as f:
+            with open(os.path.join(list_path, vocab_file + '.json'), 'r') as f:
                 self.word_vocab = json.load(f)
             self.allow_unk = allow_unk
 

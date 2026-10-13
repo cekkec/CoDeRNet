@@ -27,7 +27,6 @@ class BranchProjection(nn.Module):
         super().__init__()
         self.seg_proj = nn.ModuleList([_make_proj(d_model) for _ in range(num_scales)])
         self.cap_proj = nn.ModuleList([_make_proj(d_model) for _ in range(num_scales)])
-        print(f'[BranchProjection] d_model={d_model}, num_scales={num_scales}')
 
     def forward(self, chg_feats):
         """

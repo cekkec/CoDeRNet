@@ -1,10 +1,9 @@
-import torch
 from torch.utils.data import Dataset
 import json
 import os
 import numpy as np
 import random as pyrandom
-from random import randint, random, uniform
+from random import randint
 from imageio import imread
 
 from .LEVIR_MCI import (
@@ -88,7 +87,6 @@ class WHUCDCDataset(Dataset):
                 "captions": captions, "name": fname,
             })
 
-        # Compute mean/std (WHU-CDC specific — placeholder, will compute below)
         self._compute_stats()
 
     def _compute_stats(self):

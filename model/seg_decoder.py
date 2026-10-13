@@ -3,7 +3,6 @@ Segmentation Decoder.
 FPN top-down pathway + ResBlock refinement, then a 2-stage transposed
 convolution head produces per-class logits at the input resolution.
 """
-import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
@@ -39,7 +38,6 @@ class SegDecoder(nn.Module):
         if use_refine:
             self.refine_blocks = nn.Sequential(
                 *[ResBlock(d_model) for _ in range(refine_n_blocks)])
-            print(f'[SegDecoder] Refinement enabled ({refine_n_blocks} ResBlocks)')
 
         self.seg_head = nn.Sequential(
             nn.ConvTranspose2d(d_model, d_model // 2, 4, stride=2, padding=1),

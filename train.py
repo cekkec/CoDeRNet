@@ -8,6 +8,9 @@ Usage:
 All hyperparameters can be overridden via CLI; dataset-specific defaults
 (data paths, max_length, num_classes, ...) are applied automatically based
 on --dataset.
+
+After the last epoch the best checkpoint is evaluated on the test split and
+the scores are written to <savepath>/test_summary.txt.
 """
 import torch
 import torch.nn.functional as F
@@ -24,16 +27,19 @@ from tqdm import tqdm
 from data.LEVIR_MCI import LEVIRCCDataset
 from data.WHU_CDC import WHUCDCDataset, build_whu_vocab
 from model.change_model import ChangeModel
-from utils_tool.utils import *
+from utils_tool.utils import accuracy, get_eval_score, print_log
 from utils_tool.metrics import Evaluator
+from utils_tool.options import add_data_args, add_model_args, apply_dataset_defaults
 
-# Checkpoint-selection criterion used in the paper:
-# mIoU (detection) + BLEU-4 (lexical precision) + CIDEr (consensus semantic).
-# METEOR and ROUGE-L are still computed and reported, but not used for selection.
-EARLY_STOP_SELECTOR = "SUM_mIoU_B4_CIDEr"
-SELECTORS = {
-    EARLY_STOP_SELECTOR: lambda m: m["mIoU"] + m["B4"] + m["C"],
-}
+# Default output folder per dataset: ./Results/<name>/
+_RUN_NAMES = {'levir': 'levir_mci', 'whu': 'whu_cdc'}
+
+
+def selection_score(m):
+    """Checkpoint-selection criterion used in the paper:
+    mIoU (detection) + BLEU-4 (lexical precision) + CIDEr (consensus semantic).
+    METEOR and ROUGE-L are still computed and reported, but not used for selection."""
+    return m["mIoU"] + m["B4"] + m["C"]
 
 
 def _worker_init_fn(worker_id):
@@ -92,18 +98,14 @@ class Trainer:
     def __init__(self, args):
         self.args = args
 
-        # Run name = backbone + timestamp (paper-fixed architecture choices omitted)
-        name = f"{args.backbone}_{time_file_str()}"
-        if not os.path.exists(args.savepath):
-            os.makedirs(args.savepath)
-        self.args.savepath = os.path.join(args.savepath, name)
-        os.makedirs(self.args.savepath, exist_ok=True)
-        self.log = open(os.path.join(self.args.savepath, f'{name}.log'), 'w')
+        # All outputs (log, best checkpoint, summaries) go directly into savepath
+        os.makedirs(args.savepath, exist_ok=True)
+        self.log = open(os.path.join(args.savepath, 'train.log'), 'w')
         self.print_config(args)
 
-        # Multi-selector best tracking
-        self.best_tracker = {sel: _make_empty_record() for sel in SELECTORS}
-        self.best_paths = {sel: None for sel in SELECTORS}  # checkpoint file per selector
+        # Best validation result so far and its checkpoint file
+        self.best = _make_empty_record()
+        self.best_path = None
 
         # Vocab
         if args.dataset == 'levir':
@@ -115,22 +117,9 @@ class Trainer:
         # Model
         self.model = ChangeModel(args, self.word_vocab).cuda()
 
-        # Log module-level parameter counts
-        total_params = sum(p.numel() for p in self.model.parameters())
-        print_log(f'[Params] total: {total_params:,}', self.log)
-        for name in ('encoder', 'fusion', 'projection', 'comp_inter',
-                     'seg_decoder', 'cap_decoder'):
-            module = getattr(self.model, name, None)
-            if module is not None:
-                p = sum(x.numel() for x in module.parameters())
-                print_log(f'[Params] {name}: {p:,}', self.log)
-
-        # Loss
-        self.criterion_det = None  # use cross_entropy_2d_deterministic
-        self.criterion_cap = None  # use cross_entropy_1d_deterministic
-
         # Optimizer
-        param_groups = self.model.get_param_groups(args.encoder_lr, args.decoder_lr)
+        param_groups = self.model.get_param_groups(
+            args.encoder_lr, args.decoder_lr, vit_lr=args.vit_lr)
         self.optimizer = torch.optim.Adam(param_groups)
         self.lr_scheduler = torch.optim.lr_scheduler.StepLR(self.optimizer, step_size=50, gamma=0.5)
 
@@ -178,7 +167,7 @@ class Trainer:
         # Checkpoint resume
         if args.checkpoint is not None:
             ckpt = torch.load(args.checkpoint, map_location='cpu')
-            self.model.load_state_dict(ckpt['model_dict'])
+            self.model.load_state_dict(ckpt['model_dict'] if 'model_dict' in ckpt else ckpt)
             print(f'Loaded checkpoint from {args.checkpoint}')
 
     def print_config(self, args):
@@ -187,8 +176,6 @@ class Trainer:
         print_log("\n" + "=" * 80, self.log)
         for k, v in sorted(d.items()):
             print_log(f"  {k:<{w}} {v}", self.log)
-        print_log("=" * 80, self.log)
-        print_log(f"  Selector: {EARLY_STOP_SELECTOR}", self.log)
         print_log("=" * 80 + "\n", self.log)
 
     def training(self, epoch):
@@ -292,48 +279,12 @@ class Trainer:
                     hypotheses.append(
                         [w for w in seq if w not in {wv['<START>'], wv['<END>'], wv['<NULL>']}])
 
-        # Feature similarity analysis (every 10 epochs)
-        if epoch % 10 == 0:
-            sample_A, sample_B = next(iter(self.val_loader))[:2]
-            sim = self.model.compute_feature_similarity(
-                sample_A.cuda(non_blocking=True),
-                sample_B.cuda(non_blocking=True),
-            )
-            print_log(f"\n[Feature Similarity @ epoch {epoch}]", self.log)
-            for s in ['1/4', '1/8', '1/16', '1/32']:
-                pre = sim.get(f'seg_vs_cap_{s}_pre', 0)
-                post = sim.get(f'seg_vs_cap_{s}_post', None)
-                line = f"  {s:>4s}  seg-cap={pre:.4f}"
-                if post is not None:
-                    line += f"  -> {post:.4f} (post-inter)"
-                print_log(line, self.log)
-
-        # Interaction stats (every 10 epochs, averaged over 50 val samples).
-        if epoch % 10 == 0:
-            stats_accum = {}
-            n_samples = 0
-            for idx, batch in enumerate(self.val_loader):
-                if idx >= 50:
-                    break
-                sA = batch[0].cuda(non_blocking=True)
-                sB = batch[1].cuda(non_blocking=True)
-                stats = self.model.compute_interaction_stats(sA, sB)
-                if stats is not None:
-                    for k, v in stats.items():
-                        stats_accum[k] = stats_accum.get(k, 0) + v
-                    n_samples += 1
-            if n_samples > 0:
-                print_log(f"\n[Interaction Stats @ epoch {epoch} (avg over {n_samples} samples)]", self.log)
-                for k, v in stats_accum.items():
-                    print_log(f"  {k}={v/n_samples:.4f}", self.log)
-
         # Compute metrics
-        curr_IoU = "0.0000"
         curr_Acc = self.evaluator.Pixel_Accuracy()
         if self.args.dataset == 'whu':
             curr_mIoU = self.evaluator.Change_IoU()
         else:
-            curr_mIoU, curr_IoU = self.evaluator.Mean_Intersection_over_Union()
+            curr_mIoU, _ = self.evaluator.Mean_Intersection_over_Union()
         curr_F1, _ = self.evaluator.F1_Score()
         curr_FWIoU = self.evaluator.Frequency_Weighted_Intersection_over_Union()
         iou_label = "cIoU" if self.args.dataset == 'whu' else "mIoU"
@@ -372,80 +323,60 @@ class Trainer:
         R_p = curr_R * 100
         C_p = curr_C * 100
 
-        # Current metrics dict (used by selectors)
         metrics = {
             "Acc": Acc_p, "mIoU": mIoU_p, "F1": F1_p, "FWIoU": FWIoU_p,
             "B1": B1_p, "B2": B2_p, "B3": B3_p, "B4": B4_p,
             "M": M_p, "R": R_p, "C": C_p, "epoch": epoch,
         }
+        self._update_best(metrics, epoch)
+        self._report_best()
 
-        # Update best tracker per selector + save checkpoints
-        state = None  # lazy: only serialize once if needed
-        saved_any = False
-        for sel_name, sel_fn in SELECTORS.items():
-            sel_score = sel_fn(metrics)
-            if sel_score > self.best_tracker[sel_name]["score"] and epoch > 3:
-                self.best_tracker[sel_name] = {"score": sel_score, **metrics}
-                # Save checkpoint for this selector
-                if state is None:
-                    state = {"model_dict": self.model.state_dict()}
-                ckpt_path = os.path.join(self.args.savepath, f"best_{sel_name}.pth")
-                torch.save(state, ckpt_path)
-                self.best_paths[sel_name] = ckpt_path
-                saved_any = True
-                print_log(f"  [BEST {sel_name}] score={sel_score:.2f} -> saved {os.path.basename(ckpt_path)}", self.log)
-            elif sel_score > self.best_tracker[sel_name]["score"]:
-                # Update tracker but don't save (epoch <= 3)
-                self.best_tracker[sel_name] = {"score": sel_score, **metrics}
+    def _update_best(self, metrics, epoch):
+        """Track the best validation result; from epoch 4 on, each new best is
+        saved as best_epoch<N>.pth and replaces the previous best checkpoint."""
+        score = selection_score(metrics)
+        if not score > self.best["score"]:
+            return
+        self.best = {"score": score, **metrics}
+        if epoch > 3:
+            ckpt_path = os.path.join(self.args.savepath, f"best_epoch{epoch}.pth")
+            torch.save({"model_dict": self.model.state_dict()}, ckpt_path)
+            if self.best_path and os.path.exists(self.best_path):
+                os.remove(self.best_path)
+            self.best_path = ckpt_path
+            print_log(f"  [BEST] score={score:.2f} -> saved {os.path.basename(ckpt_path)}", self.log)
 
-        # Print best tracker table
+    def _report_best(self):
+        """Print the best validation result so far and mirror it to val_summary.txt."""
         iou_col = "cIoU" if self.args.dataset == 'whu' else "mIoU"
-        print_log("-" * 110, self.log)
-        print_log(
-            f"{'Selector':<20} | {'Score':<8} | {iou_col:<6} | {'B4':<6} | "
-            f"{'M':<6} | {'R':<6} | {'C':<6} | {'Ep':<4} | {'Ckpt':<5}",
-            self.log)
-        print_log("-" * 110, self.log)
-        for sel_name in SELECTORS:
-            d = self.best_tracker[sel_name]
-            score = d["score"] if d["score"] != -1 else 0.0
-            has_ckpt = "Yes" if self.best_paths[sel_name] else "-"
-            print_log(
-                f"{sel_name:<20} | {score:<8.2f} | {d['mIoU']:<6.1f} | {d['B4']:<6.1f} | "
-                f"{d['M']:<6.1f} | {d['R']:<6.1f} | {d['C']:<6.1f} | {d['epoch']:<4} | {has_ckpt:<5}",
-                self.log)
-        print_log("-" * 110, self.log)
+        d = self.best
+        score = d["score"] if d["score"] != -1 else 0.0
+        has_ckpt = "Yes" if self.best_path else "-"
+        header = (f"{'Score':<8} | {iou_col:<6} | {'B4':<6} | {'M':<6} | {'R':<6} | "
+                  f"{'C':<6} | {'Ep':<4} | {'Ckpt':<5}")
+        row = (f"{score:<8.2f} | {d['mIoU']:<6.1f} | {d['B4']:<6.1f} | {d['M']:<6.1f} | "
+               f"{d['R']:<6.1f} | {d['C']:<6.1f} | {d['epoch']:<4} | {has_ckpt:<5}")
+        print_log("-" * 80, self.log)
+        print_log("Best validation result so far", self.log)
+        print_log(header, self.log)
+        print_log(row, self.log)
+        print_log("-" * 80, self.log)
 
-        # Save val summary (overwritten each epoch, final state = best per selector)
-        val_summary_path = os.path.join(self.args.savepath, "val_summary.txt")
-        with open(val_summary_path, 'w') as f:
-            f.write(f"{'Selector':<20} {'Score':<10} {iou_col:<8} {'B4':<8} {'M':<8} {'R':<8} {'C':<8} {'Ep':<5} {'Ckpt':<5}\n")
-            f.write("-" * 95 + "\n")
-            for sel_name in SELECTORS:
-                d = self.best_tracker[sel_name]
-                score = d["score"] if d["score"] != -1 else 0.0
-                has_ckpt = "Yes" if self.best_paths[sel_name] else "-"
-                f.write(f"{sel_name:<20} {score:<10.2f} {d['mIoU']:<8.1f} {d['B4']:<8.1f} "
-                        f"{d['M']:<8.1f} {d['R']:<8.1f} {d['C']:<8.1f} {d['epoch']:<5} {has_ckpt:<5}\n")
+        # Overwritten each epoch; the final state is the selected checkpoint
+        with open(os.path.join(self.args.savepath, "val_summary.txt"), 'w') as f:
+            f.write(header + "\n")
+            f.write("-" * 80 + "\n")
+            f.write(row + "\n")
 
     @torch.inference_mode()
     def _collect_gate_stats(self, loader, max_batches=50):
-        """Aggregate per-batch interaction/gate stats for P2 data-adaptivity check.
+        """Summarize the CoDeR routing statistics over a dataset.
 
-        Each per-direction operator (ours/confcross/consensus/diffgate/pairgate/...)
-        returns a dict of scalar stats from its forward pass (mean over spatial/channel).
-        We collect those scalars across up to `max_batches` val/test samples and
-        summarize the dataset-level distribution (mean/std/min/max over batches).
-
-        The summary is the primary evidence for the disagreement principle's
-        falsifiable prediction: gate mean should differ between datasets
-        (e.g. WHU low gate vs LEVIR higher gate).
+        Each CoDeR block reports the spatial mean of its target cue, source cue
+        and routing mask for one forward pass. These scalars are collected over
+        up to `max_batches` batches and reduced to mean/std/min/max, which shows
+        how strongly each direction routes on a given dataset.
         """
-        if not getattr(self.args, 'interaction', False):
-            return None
-        if not hasattr(self.model, 'comp_inter'):
-            return None
-
         self.model.eval()
         accum = {}
         n = 0
@@ -479,26 +410,18 @@ class Trainer:
         return summary
 
     def auto_test(self):
-        """Run test inference on all saved best checkpoints after training."""
-        saved = {sel: path for sel, path in self.best_paths.items() if path and os.path.exists(path)}
-        if not saved:
-            print_log("\n[Auto-Test] No checkpoints saved, skipping.", self.log)
+        """Evaluate the best checkpoint on the test split after training."""
+        if not (self.best_path and os.path.exists(self.best_path)):
+            print_log("\n[Auto-Test] No checkpoint saved, skipping.", self.log)
             return
-
-        # Deduplicate by epoch: selectors that peaked at the same epoch share one eval
-        epoch_groups = {}  # epoch -> (ckpt_path, [selector_names])
-        for sel, path in saved.items():
-            ep = self.best_tracker[sel]["epoch"]
-            if ep not in epoch_groups:
-                epoch_groups[ep] = (path, [])
-            epoch_groups[ep][1].append(sel)
-
-        print_log(f"\n{'='*110}", self.log)
-        print_log(f"[Auto-Test] {len(saved)} selectors -> {len(epoch_groups)} unique epoch(s) to evaluate on TEST split", self.log)
-        print_log(f"{'='*110}", self.log)
 
         args = self.args
         word_vocab = self.word_vocab
+        ep = self.best["epoch"]
+
+        print_log(f"\n{'='*110}", self.log)
+        print_log(f"[Auto-Test] Evaluating {os.path.basename(self.best_path)} on the TEST split", self.log)
+        print_log(f"{'='*110}", self.log)
 
         if args.dataset == 'levir':
             test_ds = LEVIRCCDataset(args.data_folder, args.list_path, 'test',
@@ -514,125 +437,88 @@ class Trainer:
         )
         test_loader = data.DataLoader(test_ds, **test_kwargs)
 
-        test_results = {}  # selector -> metrics
+        ckpt = torch.load(self.best_path, map_location='cpu')
+        self.model.load_state_dict(ckpt['model_dict'])
+        self.model.eval()
 
-        for ep, (ckpt_path, selectors) in sorted(epoch_groups.items()):
-            sel_label = "+".join(selectors)
-            print_log(f"\n--- Testing ep{ep}: {os.path.basename(ckpt_path)} (selectors: {sel_label}) ---", self.log)
+        references, hypotheses = [], []
+        evaluator = Evaluator(num_class=args.num_classes)
 
-            ckpt = torch.load(ckpt_path, map_location='cpu')
-            self.model.load_state_dict(ckpt['model_dict'])
-            self.model.eval()
+        with torch.inference_mode():
+            for imgA, imgB, seg_label, token_all, _, _, _, _ in tqdm(test_loader, desc=f'Test(ep{ep})'):
+                imgA_c = imgA.cuda(non_blocking=True)
+                imgB_c = imgB.cuda(non_blocking=True)
+                token_all = token_all.squeeze(0).cuda(non_blocking=True)
 
-            references, hypotheses = [], []
-            evaluator = Evaluator(num_class=args.num_classes)
+                seg_out, _ = self.model(imgA_c, imgB_c, train_goal=0,
+                                        target_size=seg_label.shape[-2:])
+                seq = self.model.sample_caption(imgA_c, imgB_c)
 
-            with torch.inference_mode():
-                for imgA, imgB, seg_label, token_all, _, _, _, _ in tqdm(test_loader, desc=f'Test(ep{ep})'):
-                    imgA_c = imgA.cuda(non_blocking=True)
-                    imgB_c = imgB.cuda(non_blocking=True)
-                    token_all = token_all.squeeze(0).cuda(non_blocking=True)
+                pred_seg = np.argmax(seg_out.cpu().numpy(), axis=1)
+                evaluator.add_batch(seg_label.numpy(), pred_seg)
 
-                    seg_out, _ = self.model(imgA_c, imgB_c, train_goal=0,
-                                            target_size=seg_label.shape[-2:])
-                    seq = self.model.sample_caption(imgA_c, imgB_c)
+                img_tokens = [
+                    [w for w in c if w not in {word_vocab['<START>'], word_vocab['<END>'], word_vocab['<NULL>']}]
+                    for c in token_all.tolist()]
+                references.append(img_tokens)
+                hypotheses.append(
+                    [w for w in seq if w not in {word_vocab['<START>'], word_vocab['<END>'], word_vocab['<NULL>']}])
 
-                    pred_seg = np.argmax(seg_out.cpu().numpy(), axis=1)
-                    evaluator.add_batch(seg_label.numpy(), pred_seg)
+        if args.dataset == 'whu':
+            mIoU_t = evaluator.Change_IoU()
+        else:
+            mIoU_t, _ = evaluator.Mean_Intersection_over_Union()
+        sc = get_eval_score(references, hypotheses)
+        result = {
+            "mIoU": mIoU_t * 100, "cIoU_bin": evaluator.Binary_Change_IoU() * 100,
+            "B1": sc["Bleu_1"] * 100, "B2": sc["Bleu_2"] * 100,
+            "B3": sc["Bleu_3"] * 100, "B4": sc["Bleu_4"] * 100,
+            "M": sc["METEOR"] * 100, "R": sc["ROUGE_L"] * 100, "C": sc["CIDEr"] * 100,
+        }
 
-                    img_tokens = [
-                        [w for w in c if w not in {word_vocab['<START>'], word_vocab['<END>'], word_vocab['<NULL>']}]
-                        for c in token_all.tolist()]
-                    references.append(img_tokens)
-                    hypotheses.append(
-                        [w for w in seq if w not in {word_vocab['<START>'], word_vocab['<END>'], word_vocab['<NULL>']}])
+        # Routing statistics of the same checkpoint
+        gate_summary = self._collect_gate_stats(test_loader, max_batches=50)
 
-            if args.dataset == 'whu':
-                mIoU_t = evaluator.Change_IoU()
-            else:
-                mIoU_t, _ = evaluator.Mean_Intersection_over_Union()
-            sc = get_eval_score(references, hypotheses)
-            result = {
-                "mIoU": mIoU_t * 100,
-                "B1": sc["Bleu_1"] * 100, "B2": sc["Bleu_2"] * 100,
-                "B3": sc["Bleu_3"] * 100, "B4": sc["Bleu_4"] * 100,
-                "M": sc["METEOR"] * 100, "R": sc["ROUGE_L"] * 100, "C": sc["CIDEr"] * 100,
-            }
+        self._report_test(result, ep, gate_summary)
 
-            iou_l = "cIoU" if args.dataset == 'whu' else "mIoU"
-            print_log(
-                f"  {iou_l}={result['mIoU']:.1f}  B4={result['B4']:.1f}  "
-                f"M={result['M']:.1f}  R={result['R']:.1f}  C={result['C']:.1f}",
-                self.log)
+    def _report_test(self, r, ep, gate_summary=None):
+        """Print the test-split scores and write them to test_summary.txt."""
+        iou_col = "cIoU" if self.args.dataset == 'whu' else "mIoU"
+        header = (f"{iou_col:<7} | {'binIoU':<7} | {'B1':<7} | {'B2':<7} | {'B3':<7} | "
+                  f"{'B4':<7} | {'M':<7} | {'R':<7} | {'C':<8} | {'Epoch':<5}")
+        row = (f"{r['mIoU']:<7.2f} | {r['cIoU_bin']:<7.2f} | {r['B1']:<7.2f} | "
+               f"{r['B2']:<7.2f} | {r['B3']:<7.2f} | {r['B4']:<7.2f} | {r['M']:<7.2f} | "
+               f"{r['R']:<7.2f} | {r['C']:<8.2f} | {ep:<5}")
+        gate_lines = []
+        if gate_summary is not None:
+            gate_lines = [
+                f"{k:<28} mean={s['mean']:.4f}  std={s['std']:.4f}  "
+                f"min={s['min']:.4f}  max={s['max']:.4f}  n={s['n_batches']}"
+                for k, s in sorted(gate_summary.items())]
 
-            for sel in selectors:
-                test_results[sel] = result
-
-        # Final summary table
-        iou_col = "cIoU" if args.dataset == 'whu' else "mIoU"
         print_log(f"\n{'='*110}", self.log)
         print_log("[Auto-Test] Final Summary (TEST split)", self.log)
         print_log(f"{'='*110}", self.log)
-        print_log(
-            f"{'Selector':<20} | {'ValScore':<10} | {iou_col:<8} | {'B4':<8} | "
-            f"{'M':<8} | {'R':<8} | {'C':<8} | {'ValEp':<5}",
-            self.log)
-        print_log("-" * 90, self.log)
-        for sel_name in SELECTORS:
-            if sel_name not in test_results:
-                continue
-            r = test_results[sel_name]
-            val_ep = self.best_tracker[sel_name]["epoch"]
-            val_score = self.best_tracker[sel_name]["score"]
-            print_log(
-                f"{sel_name:<20} | {val_score:<10.2f} | {r['mIoU']:<8.1f} | {r['B4']:<8.1f} | "
-                f"{r['M']:<8.1f} | {r['R']:<8.1f} | {r['C']:<8.1f} | {val_ep:<5}",
-                self.log)
+        print_log(header, self.log)
+        print_log("-" * 110, self.log)
+        print_log(row, self.log)
         print_log("=" * 110, self.log)
-
-        # Gate statistics collection (P2 data-adaptivity check) --
-        # load the primary selector's best checkpoint as a consistent reference.
-        gate_summary = None
-        primary_sel = EARLY_STOP_SELECTOR
-        best_primary_path = self.best_paths.get(primary_sel)
-        if best_primary_path and os.path.exists(best_primary_path):
-            ckpt = torch.load(best_primary_path, map_location='cpu')
-            self.model.load_state_dict(ckpt['model_dict'])
-            self.model.eval()
-            gate_summary = self._collect_gate_stats(test_loader, max_batches=50)
-
-        if gate_summary is not None:
+        if gate_lines:
             print_log(f"\n{'='*110}", self.log)
-            print_log(f"[Gate Statistics]  (best {primary_sel} checkpoint, 50 test batches)", self.log)
+            print_log("[Gate Statistics]  (best checkpoint, 50 test batches)", self.log)
             print_log(f"{'='*110}", self.log)
-            for k in sorted(gate_summary):
-                s = gate_summary[k]
-                print_log(
-                    f"  {k:<28} mean={s['mean']:.4f}  std={s['std']:.4f}  "
-                    f"min={s['min']:.4f}  max={s['max']:.4f}  n={s['n_batches']}",
-                    self.log)
+            for line in gate_lines:
+                print_log(f"  {line}", self.log)
 
-        # Save summary to file
         summary_path = os.path.join(self.args.savepath, "test_summary.txt")
         with open(summary_path, 'w') as f:
-            f.write("\n")
-            f.write(f"{'Selector':<20} {'ValScore':<10} {iou_col:<8} {'B1':<8} {'B2':<8} {'B3':<8} {'B4':<8} {'M':<8} {'R':<8} {'C':<8} {'ValEp':<5}\n")
-            f.write("-" * 105 + "\n")
-            for sel_name in SELECTORS:
-                if sel_name not in test_results:
-                    continue
-                r = test_results[sel_name]
-                val_ep = self.best_tracker[sel_name]["epoch"]
-                val_score = self.best_tracker[sel_name]["score"]
-                f.write(f"{sel_name:<20} {val_score:<10.2f} {r['mIoU']:<8.2f} {r['B1']:<8.2f} {r['B2']:<8.2f} "
-                        f"{r['B3']:<8.2f} {r['B4']:<8.2f} {r['M']:<8.2f} {r['R']:<8.2f} {r['C']:<8.2f} {val_ep:<5}\n")
-            if gate_summary is not None:
-                f.write(f"\n# Gate Statistics (best {primary_sel} checkpoint, 50 test batches)\n")
-                for k in sorted(gate_summary):
-                    s = gate_summary[k]
-                    f.write(
-                        f"# {k:<28} mean={s['mean']:.4f}  std={s['std']:.4f}  "
-                        f"min={s['min']:.4f}  max={s['max']:.4f}  n={s['n_batches']}\n")
+            f.write(header + "\n")
+            f.write("-" * 110 + "\n")
+            f.write(row + "\n")
+            if gate_lines:
+                f.write("\n# Gate Statistics (best checkpoint, 50 test batches)\n")
+                for line in gate_lines:
+                    f.write(f"# {line}\n")
         print_log(f"\nTest summary saved: {summary_path}", self.log)
 
 
@@ -658,53 +544,19 @@ def run_training(args):
 # CLI entry point (LEVIR-MCI / WHU-CDC unified)
 # ────────────────────────────────────────────────────────────────────
 
-_LEVIR_DEFAULTS = {
-    'data_folder':  '../images',
-    'list_path':    '../LEVIR_MCI/',
-    'token_folder': '../LEVIR_MCI/tokens',
-    'caption_json': None,
-    'max_length':   41,
-    'num_classes':  3,
-}
-
-_WHU_DEFAULTS = {
-    'data_folder':  '../whu_CDC_dataset/images',
-    'list_path':    None,
-    'token_folder': None,
-    'caption_json': '../whu_CDC_dataset/whuCCcaptions.json',
-    'max_length':   26,
-    'num_classes':  2,
-}
-
-
 def _parse_train_args():
     parser = argparse.ArgumentParser(description='CoDeRNet training (LEVIR-MCI / WHU-CDC)')
-
-    # Dataset switch (drives data-path / class-count defaults)
-    parser.add_argument('--dataset', choices=['levir', 'whu'], required=True)
-
-    # Data (defaults filled per --dataset; override here if needed)
-    parser.add_argument('--data_folder',  default=None)
-    parser.add_argument('--list_path',    default=None)
-    parser.add_argument('--token_folder', default=None)
-    parser.add_argument('--vocab_file',   default='vocab')
-    parser.add_argument('--caption_json', default=None)
-    parser.add_argument('--max_length',   type=int, default=None)
-    parser.add_argument('--num_classes',  type=int, default=None)
-    parser.add_argument('--allow_unk',    type=int, default=1)
-
-    # Encoder / model
-    parser.add_argument('--backbone',  default='tu-convnext_base')
-    parser.add_argument('--d_model',   type=int, default=256)
-    parser.add_argument('--n_heads',          type=int, default=8)
-    parser.add_argument('--decoder_n_layers', type=int, default=1)
-    parser.add_argument('--dropout',          type=float, default=0.1)
+    add_data_args(parser)
+    add_model_args(parser)
 
     # Training
     parser.add_argument('--train_batchsize', type=int, default=16)
     parser.add_argument('--num_epochs', type=int, default=150)
     parser.add_argument('--encoder_lr', type=float, default=1e-4)
     parser.add_argument('--decoder_lr', type=float, default=1e-4)
+    parser.add_argument('--vit_lr', type=float, default=None,
+                        help='learning rate of the TIPS ViT backbone (typically '
+                             '1e-5 to 2e-5); defaults to --encoder_lr')
     parser.add_argument('--grad_clip',  type=float, default=None)
     parser.add_argument('--print_freq', type=int, default=100)
     parser.add_argument('--workers',    type=int, default=4)
@@ -714,19 +566,14 @@ def _parse_train_args():
 
     # Checkpoint / output
     parser.add_argument('--checkpoint', default=None)
-    parser.add_argument('--savepath',   default='./Results/')
+    parser.add_argument('--savepath',   default=None,
+                        help='output folder (default: ./Results/levir_mci/ or ./Results/whu_cdc/)')
 
     args = parser.parse_args()
-    _apply_dataset_defaults(args)
+    apply_dataset_defaults(args, parser)
+    if args.savepath is None:
+        args.savepath = os.path.join('./Results', _RUN_NAMES[args.dataset])
     return args
-
-
-def _apply_dataset_defaults(args):
-    """Fill data-path / class-count defaults based on --dataset."""
-    defaults = _LEVIR_DEFAULTS if args.dataset == 'levir' else _WHU_DEFAULTS
-    for key, value in defaults.items():
-        if getattr(args, key, None) is None:
-            setattr(args, key, value)
 
 
 if __name__ == '__main__':

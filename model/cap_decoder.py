@@ -56,7 +56,6 @@ class CapDecoder(nn.Module):
             self.meso_pool_size = meso_pool_size
             self.meso_proj = nn.Sequential(
                 nn.Conv2d(d_model, d_model, 1, bias=False), nn.BatchNorm2d(d_model), nn.ReLU(inplace=True))
-            print(f'[CapDecoder] Meso tokens enabled (pool={meso_pool_size}x{meso_pool_size})')
 
         # Word embedding + positional encoding
         self.vocab_embedding = nn.Embedding(vocab_size, d_model)

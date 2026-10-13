@@ -6,6 +6,6 @@ Single direction-block operator with the interface:
 Spatial scale (where each direction operates) is controlled by the outer
 CompInteraction via seg_recv_scale / cap_recv_scale.
 """
-from .ours import CoDeR
+from .coder import CoDeR
 
 __all__ = ['CoDeR']

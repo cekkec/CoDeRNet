@@ -22,8 +22,12 @@ from tqdm import tqdm
 from data.LEVIR_MCI import LEVIRCCDataset
 from data.WHU_CDC import WHUCDCDataset, build_whu_vocab
 from model.change_model import ChangeModel
-from utils_tool.utils import *
+from utils_tool.utils import get_eval_score
 from utils_tool.metrics import Evaluator
+from utils_tool.options import add_data_args, add_model_args, apply_dataset_defaults
+
+# Released checkpoints, looked up under ./checkpoints/ when --checkpoint is not given
+_RELEASED_CKPT = {'levir': 'levir_mci.pth', 'whu': 'whu_cdc.pth'}
 
 
 def seg_to_color(seg, num_classes=3):
@@ -51,8 +55,9 @@ def main(args):
     idx_to_word = list(word_vocab.keys())
 
     checkpoint = torch.load(args.checkpoint, map_location='cpu')
+    state_dict = checkpoint['model_dict'] if 'model_dict' in checkpoint else checkpoint
     model = ChangeModel(args, word_vocab)
-    model.load_state_dict(checkpoint['model_dict'])
+    model.load_state_dict(state_dict)
     model = model.cuda()
     model.eval()
 
@@ -62,14 +67,6 @@ def main(args):
                                   os.path.basename(args.checkpoint).replace('.pth', ''))
         for sub in ['masks', 'captions']:
             os.makedirs(os.path.join(result_dir, sub), exist_ok=True)
-
-    nochange_list = [
-        "the scene is the same as before ",
-        "there is no difference ",
-        "the two scenes seem identical ",
-        "no change has occurred ",
-        "almost nothing has changed "
-    ]
 
     # Dataset
     if args.dataset == 'levir':
@@ -85,9 +82,6 @@ def main(args):
                                    num_workers=args.workers, pin_memory=True)
 
     references, hypotheses = [], []
-    change_refs, change_hyps = [], []
-    nochange_refs, nochange_hyps = [], []
-    change_acc = nochange_acc = 0
     evaluator = Evaluator(num_class=args.num_classes)
     t0 = time.time()
 
@@ -114,22 +108,11 @@ def main(args):
                 word_vocab['<START>'], word_vocab['<END>'], word_vocab['<NULL>']}]
             hypotheses.append(pred_seq)
 
-            pred_caption = " ".join([idx_to_word[i] for i in pred_seq])
-            ref_caption = " ".join([idx_to_word[i] for i in img_tokens[0]])
-
-            if ref_caption in nochange_list:
-                nochange_refs.append(img_tokens)
-                nochange_hyps.append(pred_seq)
-                if pred_caption in nochange_list: nochange_acc += 1
-            else:
-                change_refs.append(img_tokens)
-                change_hyps.append(pred_seq)
-                if pred_caption not in nochange_list: change_acc += 1
-
             # Save per-image predictions (mask PNG + caption TXT)
             if args.save_pred and result_dir:
                 cv2.imwrite(os.path.join(result_dir, 'masks', key + '.png'),
                             seg_to_color(pred_seg[0], args.num_classes))
+                pred_caption = " ".join([idx_to_word[i] for i in pred_seq])
                 ref_all = ""
                 for tl in img_tokens:
                     ref_all += " ".join([idx_to_word[i] for i in tl]) + " .  "
@@ -142,11 +125,12 @@ def main(args):
         mIoU = evaluator.Change_IoU()
     else:
         mIoU, _ = evaluator.Mean_Intersection_over_Union()
+    cIoU_bin = evaluator.Binary_Change_IoU() * 100
     sc = get_eval_score(references, hypotheses)
 
     iou_label = "cIoU" if args.dataset == 'whu' else "mIoU"
-    print(f'\n{iou_label:<8} {"B1":<8} {"B2":<8} {"B3":<8} {"B4":<8} {"M":<8} {"R":<8} {"C":<8}')
-    print(f'{mIoU*100:<8.2f} {sc["Bleu_1"]*100:<8.2f} {sc["Bleu_2"]*100:<8.2f} '
+    print(f'\n{iou_label:<8} {"binIoU":<8} {"B1":<8} {"B2":<8} {"B3":<8} {"B4":<8} {"M":<8} {"R":<8} {"C":<8}')
+    print(f'{mIoU*100:<8.2f} {cIoU_bin:<8.2f} {sc["Bleu_1"]*100:<8.2f} {sc["Bleu_2"]*100:<8.2f} '
           f'{sc["Bleu_3"]*100:<8.2f} {sc["Bleu_4"]*100:<8.2f} {sc["METEOR"]*100:<8.2f} '
           f'{sc["ROUGE_L"]*100:<8.2f} {sc["CIDEr"]*100:<8.2f}')
     print(f'\nTime: {test_time:.1f}s')
@@ -164,66 +148,29 @@ def run_test(args):
 # CLI entry point (LEVIR-MCI / WHU-CDC unified)
 # ────────────────────────────────────────────────────────────────────
 
-_LEVIR_DEFAULTS = {
-    'data_folder':  '../images',
-    'list_path':    '../LEVIR_MCI/',
-    'token_folder': '../LEVIR_MCI/tokens',
-    'caption_json': None,
-    'max_length':   41,
-    'num_classes':  3,
-}
-
-_WHU_DEFAULTS = {
-    'data_folder':  '../whu_CDC_dataset/images',
-    'list_path':    None,
-    'token_folder': None,
-    'caption_json': '../whu_CDC_dataset/whuCCcaptions.json',
-    'max_length':   26,
-    'num_classes':  2,
-}
-
-
 def _parse_test_args():
     parser = argparse.ArgumentParser(description='CoDeRNet test (LEVIR-MCI / WHU-CDC)')
+    add_data_args(parser)
+    add_model_args(parser)       # must match the training configuration
 
-    # Dataset switch
-    parser.add_argument('--dataset', choices=['levir', 'whu'], required=True)
-
-    # Data (defaults filled per --dataset)
-    parser.add_argument('--data_folder',  default=None)
-    parser.add_argument('--list_path',    default=None)
-    parser.add_argument('--token_folder', default=None)
-    parser.add_argument('--vocab_file',   default='vocab')
-    parser.add_argument('--caption_json', default=None)
-    parser.add_argument('--max_length',   type=int, default=None)
-    parser.add_argument('--num_classes',  type=int, default=None)
-    parser.add_argument('--allow_unk',    type=int, default=1)
-    parser.add_argument('--gpu_id',       type=int, default=0)
-
-    # Model (must match training config)
-    parser.add_argument('--backbone',         default='tu-convnext_base')
-    parser.add_argument('--d_model',          type=int, default=256)
-    parser.add_argument('--n_heads',          type=int, default=8)
-    parser.add_argument('--decoder_n_layers', type=int, default=1)
-    parser.add_argument('--dropout',          type=float, default=0.1)
-    parser.add_argument('--workers',          type=int, default=4)
+    parser.add_argument('--workers', type=int, default=4)
+    parser.add_argument('--gpu_id',  type=int, default=0)
 
     # Test-specific
-    parser.add_argument('--checkpoint',  required=True)
+    parser.add_argument('--checkpoint',  default=None,
+                        help='model weights (.pth); default: ./checkpoints/levir_mci.pth '
+                             'or ./checkpoints/whu_cdc.pth depending on --dataset')
     parser.add_argument('--result_path', default='./predict_result/')
     parser.add_argument('--save_pred',   action='store_true', default=False,
                         help='Save per-image predicted masks (PNG) and captions (TXT).')
 
     args = parser.parse_args()
-    _apply_dataset_defaults(args)
+    apply_dataset_defaults(args, parser)
+    if args.checkpoint is None:
+        args.checkpoint = os.path.join('./checkpoints', _RELEASED_CKPT[args.dataset])
+    if not os.path.isfile(args.checkpoint):
+        parser.error(f'checkpoint not found: {args.checkpoint}')
     return args
-
-
-def _apply_dataset_defaults(args):
-    defaults = _LEVIR_DEFAULTS if args.dataset == 'levir' else _WHU_DEFAULTS
-    for key, value in defaults.items():
-        if getattr(args, key, None) is None:
-            setattr(args, key, value)
 
 
 if __name__ == '__main__':

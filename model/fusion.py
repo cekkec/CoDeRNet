@@ -24,7 +24,6 @@ class ChangeFusion(nn.Module):
                 nn.ReLU(inplace=True),
             ) for _ in range(num_scales)
         ])
-        print(f'[ChangeFusion] in_channels={self.IN_MULT}*d_model')
 
     def forward(self, feat_A, feat_B):
         """

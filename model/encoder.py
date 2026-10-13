@@ -2,15 +2,15 @@
 Backbone encoder via segmentation_models_pytorch.
 Full fine-tuning. Outputs 4-scale feature pyramid projected to d_model.
 
-Supported: 'tu-convnext_small', 'tu-convnext_tiny', 'mit_b2', 'resnet50', etc.
+The paper uses 'tu-convnext_base' (ImageNet-pretrained); any smp encoder name
+with a 5-stage feature pyramid works (e.g. 'tu-convnext_small', 'resnet50').
 """
-import torch
 import torch.nn as nn
 import segmentation_models_pytorch as smp
 
 
 class Encoder(nn.Module):
-    def __init__(self, backbone_name='tu-convnext_tiny', d_model=256, pretrained=True):
+    def __init__(self, backbone_name='tu-convnext_base', d_model=256, pretrained=True):
         super().__init__()
         weights = 'imagenet' if pretrained else None
         self.backbone = smp.encoders.get_encoder(backbone_name, weights=weights, depth=5)
@@ -26,11 +26,6 @@ class Encoder(nn.Module):
                 nn.ReLU(inplace=True),
             ) for c in self.feat_channels
         ])
-
-        n_total = sum(p.numel() for p in self.parameters())
-        n_backbone = sum(p.numel() for p in self.backbone.parameters())
-        print(f'[Encoder] {backbone_name} | backbone {n_backbone/1e6:.1f}M | '
-              f'proj {(n_total-n_backbone)/1e6:.1f}M | total {n_total/1e6:.1f}M')
 
     def forward(self, x):
         """
